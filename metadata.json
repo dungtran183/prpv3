@@ -1,0 +1,5 @@
+{
+  "name": "Paper Reviewer Pro",
+  "description": "An advanced tool to review academic papers using Gemini Pro. Users can upload manuscripts and context files to receive comprehensive, AI-generated reviews. The app supports parallel reviews using multiple API keys and allows downloading reports.",
+  "requestFramePermissions": []
+}
