@@ -2,6 +2,8 @@
 import React, { useState, useCallback } from 'react';
 import type { UploadFile } from '../types';
 import { UploadCloudIcon, FileIcon, XIcon } from './icons';
+import { storage } from '../services/firebase';
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
 interface FileUploadProps {
   files: UploadFile[];
@@ -9,21 +11,10 @@ interface FileUploadProps {
   maxFiles?: number;
 }
 
-const fileToBase64 = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = () => {
-      const result = reader.result as string;
-      resolve(result.split(',')[1]); // remove the "data:mime/type;base64," part
-    };
-    reader.onerror = error => reject(error);
-  });
-};
-
 const FileUpload: React.FC<FileUploadProps> = ({ files, setFiles, maxFiles = 10 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const handleFiles = useCallback(async (selectedFiles: FileList | null) => {
     if (!selectedFiles) return;
@@ -34,23 +25,34 @@ const FileUpload: React.FC<FileUploadProps> = ({ files, setFiles, maxFiles = 10 
       return;
     }
 
-    const newUploadFiles: UploadFile[] = [];
-    for (const file of Array.from(selectedFiles)) {
+    setUploading(true);
+
+    const uploadPromises = Array.from(selectedFiles).map(async (file) => {
       try {
-        const base64 = await fileToBase64(file);
-        newUploadFiles.push({
+        const storagePath = `uploads/${crypto.randomUUID()}-${file.name}`;
+        const storageRef = ref(storage, storagePath);
+        
+        const snapshot = await uploadBytes(storageRef, file);
+        const url = await getDownloadURL(snapshot.ref);
+
+        return {
           name: file.name,
           type: file.type,
           size: file.size,
-          base64,
-        });
+          url,
+          storagePath,
+        };
       } catch (err) {
-        console.error("Error converting file to base64", err);
-        setError(`Failed to process file: ${file.name}`);
+        console.error("Error uploading file to Firebase Storage", err);
+        setError(`Failed to upload file: ${file.name}`);
+        return null; // Return null for failed uploads
       }
-    }
+    });
 
+    const newUploadFiles = (await Promise.all(uploadPromises)).filter(Boolean) as UploadFile[];
     setFiles(prev => [...prev, ...newUploadFiles]);
+    setUploading(false);
+
   }, [files.length, maxFiles, setFiles]);
 
   const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
@@ -82,6 +84,8 @@ const FileUpload: React.FC<FileUploadProps> = ({ files, setFiles, maxFiles = 10 
   };
 
   const removeFile = (index: number) => {
+    // Note: This only removes the file from the UI state.
+    // A robust implementation would also delete the file from Firebase Storage.
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
@@ -94,11 +98,13 @@ const FileUpload: React.FC<FileUploadProps> = ({ files, setFiles, maxFiles = 10 
         onDrop={handleDrop}
         className={`relative border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
           isDragging ? 'border-indigo-500 bg-gray-800' : 'border-gray-600 hover:border-gray-500'
-        }`}
+        } ${uploading ? 'opacity-50 cursor-not-allowed' : ''}`}
       >
         <UploadCloudIcon className="mx-auto h-12 w-12 text-gray-400" />
         <p className="mt-2 text-sm text-gray-400">
-          <span className="font-semibold text-indigo-400">Click to upload</span> or drag and drop
+            {uploading ? 'Uploading...' : 
+                <><span className="font-semibold text-indigo-400">Click to upload</span> or drag and drop</>
+            }
         </p>
         <p className="text-xs text-gray-500">Up to {maxFiles} files. DOCX, PDF, HTML, or images.</p>
         <input
@@ -108,6 +114,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ files, setFiles, maxFiles = 10 
           multiple
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
           onChange={handleFileChange}
+          disabled={uploading}
         />
       </div>
 
@@ -137,5 +144,3 @@ const FileUpload: React.FC<FileUploadProps> = ({ files, setFiles, maxFiles = 10 
 };
 
 export default FileUpload;
-
-   

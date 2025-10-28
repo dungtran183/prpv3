@@ -1,44 +1,65 @@
 import React, { useState } from 'react';
 import { ApiKey } from '../types';
 import { Trash2Icon } from './icons';
+import { db } from '../services/firebase';
+import { collection, addDoc, deleteDoc, doc } from "firebase/firestore";
 
 interface AdminDashboardProps {
   apiKeys: ApiKey[];
-  setApiKeys: React.Dispatch<React.SetStateAction<ApiKey[]>>;
 }
 
-const AdminDashboard: React.FC<AdminDashboardProps> = ({ apiKeys, setApiKeys }) => {
+const AdminDashboard: React.FC<AdminDashboardProps> = ({ apiKeys }) => {
     const [keyNamePrefix, setKeyNamePrefix] = useState('');
     const [keyValues, setKeyValues] = useState(''); // Textarea for multiple keys
     const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
 
-    const addApiKeys = () => {
+    const addApiKeys = async () => {
         setError('');
+        setLoading(true);
         const keysToAdd = keyValues.split('\n').map(k => k.trim()).filter(Boolean);
 
         if (!keyNamePrefix || keysToAdd.length === 0) {
             setError('Please provide a name prefix and at least one API key.');
+            setLoading(false);
             return;
         }
 
         if (apiKeys.length + keysToAdd.length > 10) {
             setError(`You can only add ${10 - apiKeys.length} more keys. Maximum is 10.`);
+            setLoading(false);
             return;
         }
 
-        const newApiKeys = keysToAdd.map((key, index) => ({
-            id: crypto.randomUUID(),
-            name: `${keyNamePrefix}-${apiKeys.length + index + 1}`,
-            key: key,
-        }));
+        const newKeyPromises = keysToAdd.map((key, index) => {
+            const newKeyData = {
+                name: `${keyNamePrefix}-${apiKeys.length + index + 1}`,
+                key: key,
+            };
+            return addDoc(collection(db, "apiKeys"), newKeyData);
+        });
 
-        setApiKeys(prev => [...prev, ...newApiKeys]);
-        setKeyNamePrefix('');
-        setKeyValues('');
+        try {
+            await Promise.all(newKeyPromises);
+            setKeyNamePrefix('');
+            setKeyValues('');
+        } catch (err) {
+            console.error("Error adding API keys: ", err);
+            setError("Failed to add API keys. Please try again.");
+        } finally {
+            setLoading(false);
+        }
     };
 
-    const removeApiKey = (id: string) => {
-        setApiKeys(apiKeys.filter(key => key.id !== id));
+    const removeApiKey = async (id: string) => {
+        if (window.confirm("Are you sure you want to delete this API key?")) {
+            try {
+                await deleteDoc(doc(db, "apiKeys", id));
+            } catch (err) {
+                console.error("Error removing API key: ", err);
+                setError("Failed to remove API key.");
+            }
+        }
     };
   
     return (
@@ -60,8 +81,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ apiKeys, setApiKeys }) 
             />
         </div>
         {error && <p className="text-sm text-red-400 mb-4">{error}</p>}
-        <button onClick={addApiKeys} disabled={apiKeys.length >= 10 || !keyNamePrefix || !keyValues} className="w-full px-4 py-2 font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors">
-            Add API Key(s) ({apiKeys.length}/10)
+        <button onClick={addApiKeys} disabled={loading || apiKeys.length >= 10 || !keyNamePrefix || !keyValues} className="w-full px-4 py-2 font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors">
+            {loading ? 'Adding...' : `Add API Key(s) (${apiKeys.length}/10)`}
         </button>
 
         <h4 className="text-md font-semibold text-gray-300 mt-6 mb-2">Active Keys</h4>

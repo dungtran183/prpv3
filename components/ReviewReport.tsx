@@ -1,18 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { jsPDF } from 'jspdf';
 import { ReviewJob, ApiKey, ChatMessage, UploadFile } from '../types';
 import { continueChat } from '../services/geminiService';
 import FileUpload from './FileUpload';
 import { DownloadIcon, CheckCircleIcon, AlertTriangleIcon, UserIcon, BotIcon } from './icons';
+import { db } from '../services/firebase';
+import { doc, updateDoc, arrayUnion } from "firebase/firestore";
+
 
 // ChatFollowUp Component
 interface ChatFollowUpProps {
     job: ReviewJob;
     apiKey: ApiKey | undefined;
-    setJobs: React.Dispatch<React.SetStateAction<ReviewJob[]>>;
 }
 
-const ChatFollowUp: React.FC<ChatFollowUpProps> = ({ job, apiKey, setJobs }) => {
+const ChatFollowUp: React.FC<ChatFollowUpProps> = ({ job, apiKey }) => {
     const [newMessage, setNewMessage] = useState('');
     const [chatFiles, setChatFiles] = useState<UploadFile[]>([]);
     const [isThinking, setIsThinking] = useState(false);
@@ -32,27 +34,23 @@ const ChatFollowUp: React.FC<ChatFollowUpProps> = ({ job, apiKey, setJobs }) => 
             files: chatFiles,
         };
 
-        // Immediately update UI with user's message
-        const updatedHistory = [...(job.chatHistory || []), userMessage];
-        setJobs(prev => prev.map(j => j.id === job.id ? { ...j, chatHistory: updatedHistory } : j));
-
-        setNewMessage('');
-        setChatFiles([]);
-
+        const jobDocRef = doc(db, 'reviewJobs', job.id);
+        
         try {
-            const modelResponseText = await continueChat(apiKey.key, updatedHistory, userMessage);
-            const modelMessage: ChatMessage = {
-                role: 'model',
-                text: modelResponseText,
-            };
-            setJobs(prev => prev.map(j => j.id === job.id ? { ...j, chatHistory: [...updatedHistory, modelMessage] } : j));
+            // Immediately update UI with user's message
+            await updateDoc(jobDocRef, { chatHistory: arrayUnion(userMessage) });
+            setNewMessage('');
+            setChatFiles([]);
+
+            const modelResponseText = await continueChat(apiKey.key, [...(job.chatHistory || []), userMessage], userMessage);
+            const modelMessage: ChatMessage = { role: 'model', text: modelResponseText };
+            await updateDoc(jobDocRef, { chatHistory: arrayUnion(modelMessage) });
+
         } catch (err: any) {
-            setChatError(err.message || "Failed to get a response.");
-             const errorMessage: ChatMessage = {
-                role: 'model',
-                text: `Error: ${err.message || "Failed to get a response."}`,
-            };
-            setJobs(prev => prev.map(j => j.id === job.id ? { ...j, chatHistory: [...updatedHistory, errorMessage] } : j));
+            const errorText = err.message || "Failed to get a response.";
+            setChatError(errorText);
+            const errorMessage: ChatMessage = { role: 'model', text: `Error: ${errorText}` };
+            await updateDoc(jobDocRef, { chatHistory: arrayUnion(errorMessage) });
         } finally {
             setIsThinking(false);
         }
@@ -113,47 +111,112 @@ const ChatFollowUp: React.FC<ChatFollowUpProps> = ({ job, apiKey, setJobs }) => 
 
 interface ReviewReportProps {
   job: ReviewJob;
-  setJobs: React.Dispatch<React.SetStateAction<ReviewJob[]>>;
   apiKeys: ApiKey[];
 }
 
-const ReviewReport: React.FC<ReviewReportProps> = ({ job, setJobs, apiKeys }) => {
-  const [progress, setProgress] = useState(0);
-
-  useEffect(() => {
-    let interval: number | undefined;
-    if (job.status === 'RUNNING') {
-        setProgress(0);
-        const duration = 90000; // Simulate 90 seconds for review
-        const startTime = Date.now();
-
-        interval = window.setInterval(() => {
-            const elapsedTime = Date.now() - startTime;
-            const newProgress = Math.min(95, (elapsedTime / duration) * 100);
-            setProgress(newProgress);
-            if (newProgress >= 95) {
-                clearInterval(interval);
-            }
-        }, 250);
-    } else if (job.status === 'COMPLETED') {
-        setProgress(100);
-    } else {
-        setProgress(0);
-    }
-    return () => clearInterval(interval);
-  }, [job.status]);
+const ReviewReport: React.FC<ReviewReportProps> = ({ job, apiKeys }) => {
 
   const handleDownloadPDF = () => {
-    // ... (PDF download logic remains the same)
+    if (!job.result) return;
+    const doc = new jsPDF();
+    const margin = 10;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const usableWidth = pageWidth - margin * 2;
+    const usableHeight = pageHeight - margin * 2;
+
+    doc.setFontSize(18);
+    doc.text(`Review for: ${job.manuscriptName}`, margin, 20);
+    doc.setFontSize(10);
+    doc.text(`Reviewed by: ${job.apiKeyName} as ${job.journalLevel}`, margin, 28);
+    doc.line(margin, 32, pageWidth - margin, 32);
+
+    doc.setFontSize(12);
+    const splitText = doc.splitTextToSize(job.result.report, usableWidth);
+    let y = 40;
+    for (let i = 0; i < splitText.length; i++) {
+        if (y > usableHeight) {
+            doc.addPage();
+            y = margin;
+        }
+        doc.text(splitText[i], margin, y);
+        y += 7; // line height
+    }
+    
+    // Add sources on a new page if they exist
+    if (job.result.sources && job.result.sources.length > 0) {
+        doc.addPage();
+        y = margin;
+        doc.setFontSize(14);
+        doc.text('Sources:', margin, y);
+        y += 10;
+        doc.setFontSize(10);
+        job.result.sources.forEach(source => {
+            if (source.web) {
+                if (y > usableHeight - 14) { // check for space for 2 lines
+                    doc.addPage();
+                    y = margin;
+                }
+                doc.setTextColor(0, 0, 255); // blue
+                doc.textWithLink(source.web.title || 'Link', margin, y, { url: source.web.uri });
+                y += 7;
+                doc.setTextColor(100); // gray
+                doc.text(source.web.uri, margin, y);
+                y += 10;
+                doc.setTextColor(0); // black
+            }
+        });
+    }
+
+    doc.save(`${job.manuscriptName}-review.pdf`);
   };
 
   const handleDownloadHTML = () => {
-    // ... (HTML download logic remains the same)
+    if (!job.result) return;
+    const sourcesHtml = job.result.sources && job.result.sources.length > 0
+      ? `<h2>Sources:</h2><ul>${job.result.sources.map(s => s.web ? `<li><a href="${s.web.uri}" target="_blank">${s.web.title || s.web.uri}</a></li>` : '').join('')}</ul>`
+      : '';
+      
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Review for ${job.manuscriptName}</title>
+        <style>
+          body { font-family: sans-serif; line-height: 1.6; padding: 20px; background-color: #f4f4f4; color: #333; }
+          .container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+          h1, h2 { color: #444; }
+          pre { white-space: pre-wrap; background: #eee; padding: 10px; border-radius: 5px; }
+          a { color: #0066cc; }
+          ul { padding-left: 20px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>Review for: ${job.manuscriptName}</h1>
+          <p><strong>Reviewed by:</strong> ${job.apiKeyName} as ${job.journalLevel}</p>
+          <hr>
+          <h2>Review Report</h2>
+          <pre>${job.result.report}</pre>
+          ${sourcesHtml}
+        </div>
+      </body>
+      </html>
+    `;
+    const blob = new Blob([htmlContent], { type: 'text/html' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${job.manuscriptName}-review.html`;
+    link.click();
+    URL.revokeObjectURL(link.href);
   };
   
   const StatusIcon = () => {
     if (job.status === 'COMPLETED') return <CheckCircleIcon className="w-5 h-5 text-green-400" />;
     if (job.status === 'FAILED') return <AlertTriangleIcon className="w-5 h-5 text-red-400" />;
+    if (job.status === 'PENDING') return <div className="w-4 h-4 bg-gray-500 rounded-full animate-pulse"></div>;
     return <div className="w-4 h-4 bg-indigo-500 rounded-full animate-spin"></div>;
   };
 
@@ -176,12 +239,14 @@ const ReviewReport: React.FC<ReviewReportProps> = ({ job, setJobs, apiKeys }) =>
         </div>
       </div>
 
-      {job.status === 'RUNNING' && (
+      {(job.status === 'RUNNING' || job.status === 'PENDING') && (
          <div className="mt-4">
             <div className="w-full bg-gray-700 rounded-full h-2.5">
-                <div className="bg-indigo-600 h-2.5 rounded-full transition-all duration-300" style={{width: `${progress}%`}}></div>
+                <div className="bg-indigo-600 h-2.5 rounded-full transition-all duration-300" style={{width: `${job.progressPercentage || 0}%`}}></div>
             </div>
-            <p className="text-center text-sm text-gray-400 mt-2">Review in progress ({Math.round(progress)}%)... You can safely leave this page.</p>
+            <p className="text-center text-sm text-gray-400 mt-2">
+              {job.progressState} ({Math.round(job.progressPercentage || 0)}%)
+            </p>
         </div>
       )}
 
@@ -209,7 +274,6 @@ const ReviewReport: React.FC<ReviewReportProps> = ({ job, setJobs, apiKeys }) =>
         </div>
         <ChatFollowUp 
           job={job} 
-          setJobs={setJobs} 
           apiKey={apiKeys.find(k => k.id === job.apiKeyId)}
         />
         </>

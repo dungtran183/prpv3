@@ -4,8 +4,8 @@ export enum UserRole {
 }
 
 export interface User {
-  id: string;
-  username: string;
+  uid: string; // Changed from id to uid to match Firebase Auth
+  username: string; // This will now be an email
   role: UserRole;
 }
 
@@ -19,7 +19,8 @@ export interface UploadFile {
   name: string;
   type: string;
   size: number;
-  base64: string;
+  url: string; // URL from Firebase Storage
+  storagePath: string; // Path in Firebase Storage for deletion
 }
 
 export enum ReviewStatus {
@@ -60,4 +61,6 @@ export interface ReviewJob {
   createdAt: string;
   files: UploadFile[];
   chatHistory?: ChatMessage[];
+  progressState?: string;
+  progressPercentage?: number;
 }

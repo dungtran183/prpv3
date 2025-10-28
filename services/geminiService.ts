@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, GenerateContentResponse, Chat } from "@google/genai";
 import type { UploadFile, GroundingChunk, ChatMessage } from '../types';
 
@@ -6,19 +7,40 @@ interface ReviewOutput {
   sources: GroundingChunk[];
 }
 
+// Helper to fetch a file from a URL and convert it to a base64 string
+async function urlToBase64(url: string): Promise<string> {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch file from URL: ${url}`);
+    }
+    const blob = await response.blob();
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onload = () => {
+            const result = reader.result as string;
+            resolve(result.split(',')[1]); // remove the "data:mime/type;base64," part
+        };
+        reader.onerror = error => reject(error);
+    });
+}
+
 export async function generateReview(
   prompt: string,
   files: UploadFile[],
   apiKey: string
 ): Promise<ReviewOutput> {
-  // IMPORTANT: A new instance is created for each call to use the specific API key.
   const ai = new GoogleGenAI({ apiKey });
 
-  const fileParts = files.map(file => ({
-    inlineData: {
-      mimeType: file.type,
-      data: file.base64,
-    },
+  // Fetch files from URLs and convert to base64 for the API call
+  const fileParts = await Promise.all(files.map(async (file) => {
+    const base64Data = await urlToBase64(file.url);
+    return {
+      inlineData: {
+        mimeType: file.type,
+        data: base64Data,
+      },
+    };
   }));
 
   const textPart = { text: prompt };
@@ -29,6 +51,7 @@ export async function generateReview(
       contents: { parts: [textPart, ...fileParts] },
       config: {
         tools: [{ googleSearch: {} }],
+        thinkingConfig: { thinkingBudget: 32768 }, // Max budget for deep analysis
       },
     });
 
@@ -47,7 +70,6 @@ export async function generateReview(
   }
 }
 
-
 export async function continueChat(
   apiKey: string,
   history: ChatMessage[],
@@ -56,12 +78,9 @@ export async function continueChat(
     const ai = new GoogleGenAI({ apiKey });
 
     const geminiHistory = history.map(msg => {
-        const parts = [{ text: msg.text }];
-        // Note: The Gemini API history doesn't directly support files in the same way as a new message.
-        // We rely on the context of the text. Files are sent with the current user prompt.
         return {
             role: msg.role,
-            parts: parts
+            parts: [{ text: msg.text }]
         };
     });
     
@@ -70,14 +89,17 @@ export async function continueChat(
         history: geminiHistory,
     });
 
-    const fileParts = newMessage.files?.map(file => ({
-        inlineData: { mimeType: file.type, data: file.base64 },
-    })) || [];
+    const fileParts = newMessage.files ? await Promise.all(newMessage.files.map(async (file) => {
+      const base64Data = await urlToBase64(file.url);
+      return {
+        inlineData: { mimeType: file.type, data: base64Data },
+      };
+    })) : [];
     
     const textPart = { text: newMessage.text };
     
     try {
-        const response = await chat.sendMessage({ parts: [textPart, ...fileParts] });
+        const response = await chat.sendMessage({ message: [textPart, ...fileParts] });
         return response.text;
     } catch (error) {
         console.error("Gemini chat call failed:", error);
